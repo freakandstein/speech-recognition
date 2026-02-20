@@ -3,13 +3,32 @@ import numpy as np
 import torch
 import whisper
 import pyaudio
+import pyautogui
+
+import re
+from difflib import get_close_matches
 from silero_vad import load_silero_vad
 
 
 # ── Silero VAD chunk size harus 512 samples pada 16kHz ──────────────────────
 SAMPLE_RATE = 16000
 CHUNK_SAMPLES = 512  # ~32ms per chunk, required by Silero VAD
+VOICE_COMMANDS = {
+    "first camera": ["command", "3"],
+    "second camera": ["command", "4"],
+    "record": ["command", "r"],
+    # Add more mappings here
+}
 
+def normalize_text(text):
+    # Lowercase, remove punctuation, collapse whitespace
+    text = text.lower()
+    text = re.sub(r'[^a-z0-9 ]+', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+def run_shortcut(keys):
+    pyautogui.hotkey(*keys)
 
 def load_whisper_model(model_name, device):
     """Load Whisper model, handle sparse tensor untuk MPS."""
@@ -253,6 +272,20 @@ def main():
             print("=" * 50)
             if text and text.replace(".", "").replace(",", "").replace(" ", ""):
                 print(f"📝 {text}")
+                # Normalize and fuzzy match
+                cmd = normalize_text(text)
+                print(f"🔗 Looking for shortcut for: '{cmd}'")
+                match = None
+                if cmd in VOICE_COMMANDS:
+                    match = cmd
+                else:
+                    # Fuzzy match: allow minor typo or punctuation difference
+                    close = get_close_matches(cmd, VOICE_COMMANDS.keys(), n=1, cutoff=0.8)
+                    if close:
+                        match = close[0]
+                if match:
+                    print(f"🔗 Executing shortcut for: {match}")
+                    run_shortcut(VOICE_COMMANDS[match])
             else:
                 print("📝 (tidak terdeteksi ucapan)")
             print("=" * 50)
