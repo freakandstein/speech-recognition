@@ -1,4 +1,3 @@
-
 # Speech Recognition CLI with Whisper & Silero VAD
 
 > **Note:** This script was tested and runs well on a MacBook M4 Max using Whisper and Silero VAD. Performance is excellent on Apple Silicon (M4/M3/M2/M1) for real-time speech recognition and transcription.
@@ -54,6 +53,21 @@ This script records audio from your microphone, automatically detects segments c
 - [Silero VAD](https://github.com/snakers4/silero-vad)
 - [PyAudio](https://people.csail.mit.edu/hubert/pyaudio/)
 
----
+## Voice Command Mapping
 
-Main script: [speech_recognition.py](speech_recognition.py)
+You can map recognized phrases to keyboard shortcuts using the `VOICE_COMMANDS` dictionary in the script. Example (from the current script):
+
+```
+VOICE_COMMANDS = {
+    "first camera": ["command", "3"],
+    "second camera": ["command", "4"],
+    "record": ["command", "r"],
+    # Add more mappings here
+}
+```
+
+When you say "First camera", the script will send Command+3 using `pyautogui` (make sure Python has Accessibility permissions in System Settings). "Second camera" will send Command+4, and "Record" will send Command+R.
+
+You can add more commands by editing the dictionary. The matching is case-insensitive, ignores punctuation, and supports fuzzy matching for minor typos.
+
+**Note:** Some system shortcuts may not work in all contexts due to macOS security restrictions.
