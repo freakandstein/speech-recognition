@@ -30,6 +30,49 @@ def load_whisper_model(model_name, device):
     return model
 
 
+def list_input_devices():
+    """Tampilkan semua input device yang tersedia."""
+    pa = pyaudio.PyAudio()
+    devices = []
+    for i in range(pa.get_device_count()):
+        info = pa.get_device_info_by_index(i)
+        if info["maxInputChannels"] > 0:
+            devices.append((i, info["name"], int(info["maxInputChannels"])))
+    pa.terminate()
+    return devices
+
+
+def select_input_device():
+    """Interaktif: tampilkan daftar device dan minta user pilih."""
+    devices = list_input_devices()
+    print("\n🎙️  Input devices tersedia:")
+    for idx, name, ch in devices:
+        print(f"  [{idx}] {name} (ch: {ch})")
+
+    default_idx = None
+    for idx, name, ch in devices:
+        if "macbook" in name.lower() or "built-in" in name.lower():
+            default_idx = idx
+            break
+    if default_idx is None:
+        default_idx = devices[0][0]
+
+    try:
+        choice = input(f"\nPilih device index (Enter = [{default_idx}] default): ").strip()
+        selected = int(choice) if choice else default_idx
+        # Validasi
+        valid_ids = [d[0] for d in devices]
+        if selected not in valid_ids:
+            print(f"⚠️  Index tidak valid, pakai default [{default_idx}]")
+            selected = default_idx
+    except ValueError:
+        selected = default_idx
+
+    chosen = next((d for d in devices if d[0] == selected), None)
+    print(f"✅ Menggunakan: [{chosen[0]}] {chosen[1]}\n")
+    return selected, chosen[2]  # return (device_index, channels)
+
+
 def get_audio_rms(chunk_bytes):
     """Hitung RMS dari raw audio bytes."""
     audio = np.frombuffer(chunk_bytes, dtype=np.int16).astype(np.float32)
@@ -42,7 +85,7 @@ def bytes_to_tensor(chunk_bytes):
     return torch.from_numpy(audio)
 
 
-def record_with_silero(silero_model, sample_rate=SAMPLE_RATE):
+def record_with_silero(silero_model, device_index=None, sample_rate=SAMPLE_RATE):
     """
     Rekam audio menggunakan Silero VAD (neural network) untuk deteksi
     suara manusia yang akurat.
@@ -57,6 +100,7 @@ def record_with_silero(silero_model, sample_rate=SAMPLE_RATE):
         channels=1,
         rate=sample_rate,
         input=True,
+        input_device_index=device_index,
         frames_per_buffer=CHUNK_SAMPLES,
     )
 
@@ -160,6 +204,9 @@ def main():
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     print(f"🖥️  Using device: {device}")
 
+    # Pilih input device
+    device_index, _ = select_input_device()
+
     # Load Silero VAD — neural network, jauh lebih akurat dari WebRTC VAD
     print("📦 Loading Silero VAD...")
     silero_model = load_silero_vad()
@@ -172,7 +219,7 @@ def main():
     print("🔁 Tekan Ctrl+C untuk berhenti\n")
     try:
         while True:
-            audio_bytes = record_with_silero(silero_model)
+            audio_bytes = record_with_silero(silero_model, device_index=device_index)
 
             duration_s = len(audio_bytes) / (SAMPLE_RATE * 2)
             overall_rms = np.sqrt(
