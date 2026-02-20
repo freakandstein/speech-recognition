@@ -1,9 +1,12 @@
+
 # Speech Recognition CLI with Whisper & Silero VAD
+
+> **Note:** This script was tested and runs well on a MacBook M4 Max using Whisper and Silero VAD. Performance is excellent on Apple Silicon (M4/M3/M2/M1) for real-time speech recognition and transcription.
 
 This script records audio from your microphone, automatically detects segments containing human speech using Silero VAD (neural network), and transcribes them using OpenAI Whisper.
 
 ## Main Features
-- **Input device selection**: Choose any microphone (USB, iPhone, Behringer, etc) or use the default MacBook mic.
+- **Input device selection**: Choose any microphone (iPhone, Audio Interface, etc) or use the default MacBook mic.
 - **Human speech detection**: Uses Silero VAD for highly accurate voice activity detection.
 - **Auto energy gate**: Calibrates automatically to ignore room noise.
 - **Automatic transcription**: Uses Whisper (model `small`).
@@ -13,14 +16,14 @@ This script records audio from your microphone, automatically detects segments c
 
 1. **Install Python 3.8+**
 2. Install dependencies:
-   ```bash
-   pip install torch numpy pyaudio whisper silero-vad
-   ```
-   - If you get a pyaudio error on Mac, install portaudio first:
-     ```bash
-     brew install portaudio
-     pip install pyaudio
-     ```
+    ```bash
+    pip3 install torch numpy pyaudio whisper silero-vad
+    ```
+    - If you get a pyaudio error on Mac, install portaudio first:
+       ```bash
+       brew install portaudio
+       pip3 install pyaudio
+       ```
 
 ## Usage
 
