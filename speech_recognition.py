@@ -1,11 +1,14 @@
-import sys
-import io
 import collections
 import numpy as np
 import torch
 import whisper
 import pyaudio
-import webrtcvad
+from silero_vad import load_silero_vad
+
+
+# ── Silero VAD chunk size harus 512 samples pada 16kHz ──────────────────────
+SAMPLE_RATE = 16000
+CHUNK_SAMPLES = 512  # ~32ms per chunk, required by Silero VAD
 
 
 def load_whisper_model(model_name, device):
@@ -27,76 +30,124 @@ def load_whisper_model(model_name, device):
     return model
 
 
-def is_loud_enough(chunk, threshold=750):
-    """Cek apakah audio cukup keras berdasarkan RMS energy."""
-    audio = np.frombuffer(chunk, dtype=np.int16)
-    rms = np.sqrt(np.mean(audio.astype(np.float32) ** 2))
-    return rms > threshold
+def get_audio_rms(chunk_bytes):
+    """Hitung RMS dari raw audio bytes."""
+    audio = np.frombuffer(chunk_bytes, dtype=np.int16).astype(np.float32)
+    return np.sqrt(np.mean(audio ** 2))
 
 
-def record_with_vad(vad, sample_rate=16000):
+def bytes_to_tensor(chunk_bytes):
+    """Konversi raw bytes ke float32 tensor untuk Silero VAD."""
+    audio = np.frombuffer(chunk_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+    return torch.from_numpy(audio)
+
+
+def record_with_silero(silero_model, sample_rate=SAMPLE_RATE):
     """
-    Rekam audio hanya saat ada suara menggunakan VAD + energy detection.
-    """
-    chunk_duration_ms = 30
-    chunk_samples = int(sample_rate * chunk_duration_ms / 1000)
-    chunk_size = chunk_samples * 2
+    Rekam audio menggunakan Silero VAD (neural network) untuk deteksi
+    suara manusia yang akurat.
 
+    Silero mengembalikan confidence score 0.0–1.0:
+      > 0.5  → kemungkinan besar suara manusia
+      < 0.35 → bukan suara manusia / silence
+    """
     pa = pyaudio.PyAudio()
     stream = pa.open(
         format=pyaudio.paInt16,
         channels=1,
         rate=sample_rate,
         input=True,
-        frames_per_buffer=chunk_samples,
+        frames_per_buffer=CHUNK_SAMPLES,
     )
 
     print("\n👂 Mendengarkan... (berbicara untuk mulai merekam)")
     print("=" * 50)
 
+    # Ring buffer: simpan ~20 chunk terakhir (~640ms)
     ring_buffer = collections.deque(maxlen=20)
     triggered = False
     voiced_frames = []
     silent_chunks = 0
-    max_silent_chunks = 40
 
-    # Flush stream dulu sebelum mulai mendengarkan
+    # 1200ms / 32ms per chunk ≈ 37 chunks diam sebelum berhenti rekam
+    max_silent_chunks = 37
+
+    SPEECH_THRESHOLD = 0.5    # di atas ini → suara manusia
+    SILENCE_THRESHOLD = 0.35  # di bawah ini → silence / non-human
+
+    # Flush stream dulu
     for _ in range(10):
-        stream.read(chunk_samples, exception_on_overflow=False)
+        stream.read(CHUNK_SAMPLES, exception_on_overflow=False)
+
+    # Kalibrasi noise floor untuk energy gate
+    print("🔧 Kalibrasi noise floor... (diam sebentar)")
+    noise_rms_samples = []
+    for _ in range(50):
+        cal_chunk = stream.read(CHUNK_SAMPLES, exception_on_overflow=False)
+        noise_rms_samples.append(get_audio_rms(cal_chunk))
+    # Buang outlier dulu: hapus sampel yang > median × 3
+    # (jika ada suara keras saat kalibrasi, sampelnya dibuang sebelum hitung threshold)
+    arr = np.array(noise_rms_samples)
+    median = np.median(arr)
+    clean = arr[arr <= median * 3]  # hanya pakai sampel yang wajar
+    if len(clean) < 5:
+        clean = arr  # fallback jika terlalu banyak yang dibuang
+    noise_floor = np.percentile(clean, 75)  # P75 dari sampel bersih
+    energy_threshold = max(200, noise_floor * 1.5)
+    print(f"📊 Noise median: {median:.1f} | Clean P75: {noise_floor:.1f} | Energy gate: {energy_threshold:.1f}")
+    print(f"   ({len(arr) - len(clean)} sampel outlier dibuang dari {len(arr)} total)\n")
 
     try:
         while True:
-            chunk = stream.read(chunk_samples, exception_on_overflow=False)
+            chunk_bytes = stream.read(CHUNK_SAMPLES, exception_on_overflow=False)
 
-            if len(chunk) != chunk_size:
+            if len(chunk_bytes) != CHUNK_SAMPLES * 2:
                 continue
 
-            try:
-                has_voice = vad.is_speech(chunk, sample_rate)
-            except Exception:
-                has_voice = False
+            # ── Silero VAD: confidence score 0.0–1.0 ────────────────────────
+            with torch.no_grad():
+                tensor = bytes_to_tensor(chunk_bytes)
+                confidence = silero_model(tensor, sample_rate).item()
+
+            # ── Energy gate ──────────────────────────────────────────────────
+            chunk_rms = get_audio_rms(chunk_bytes)
+            energy_ok = chunk_rms > energy_threshold
+
+            # Valid speech = Silero yakin DAN energy cukup
+            is_speech = (confidence > SPEECH_THRESHOLD) and energy_ok
+
+            # ── Debug real-time ──────────────────────────────────────────────
+            status = "🗣 " if is_speech else "   "
+            print(
+                f"  {status} Conf: {confidence:.2f} | RMS: {chunk_rms:6.1f} | "
+                f"{'RECORDING' if triggered else f'buf: {sum(1 for _,v in ring_buffer if v)}/{ring_buffer.maxlen}'}",
+                end="\r"
+            )
 
             if not triggered:
-                ring_buffer.append((chunk, has_voice))
-                num_voiced = len([f for f, v in ring_buffer if v])
+                ring_buffer.append((chunk_bytes, is_speech))
+                num_voiced = sum(1 for _, v in ring_buffer if v)
 
-                if num_voiced > 0.8 * ring_buffer.maxlen:
+                # Trigger jika 75% dari ring buffer adalah speech
+                if num_voiced >= 0.75 * ring_buffer.maxlen:
                     triggered = True
-                    print("🎤 Suara terdeteksi! Merekam...")
-                    voiced_frames.extend([f for f, _ in ring_buffer])
+                    print(f"\n🎤 Suara manusia terdeteksi! (conf: {confidence:.2f}) Merekam...")
+                    voiced_frames.extend([c for c, _ in ring_buffer])
                     ring_buffer.clear()
                     silent_chunks = 0
             else:
-                voiced_frames.append(chunk)
+                voiced_frames.append(chunk_bytes)
 
-                if not has_voice:
+                is_silent = (confidence < SILENCE_THRESHOLD) or not energy_ok
+                if is_silent:
                     silent_chunks += 1
                 else:
                     silent_chunks = 0
 
                 if silent_chunks > max_silent_chunks:
-                    print("🔇 Selesai berbicara, memproses...")
+                    print("\n🔇 Selesai berbicara, memproses...")
                     break
+
     finally:
         stream.stop_stream()
         stream.close()
@@ -106,29 +157,42 @@ def record_with_vad(vad, sample_rate=16000):
 
 
 def main():
-    # Setup device
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     print(f"🖥️  Using device: {device}")
 
-    # Load model
-    model = load_whisper_model("small", device)
+    # Load Silero VAD — neural network, jauh lebih akurat dari WebRTC VAD
+    print("📦 Loading Silero VAD...")
+    silero_model = load_silero_vad()
+    silero_model.eval()
+    print("✅ Silero VAD loaded\n")
 
-    # Setup VAD mode 2 = balance antara sensitif dan ketat
-    vad = webrtcvad.Vad()
-    vad.set_mode(3)
+    # Load Whisper
+    whisper_model = load_whisper_model("small", device)
 
     print("🔁 Tekan Ctrl+C untuk berhenti\n")
     try:
         while True:
-            audio_bytes = record_with_vad(vad)
+            audio_bytes = record_with_silero(silero_model)
 
-            if len(audio_bytes) < 1000:
+            duration_s = len(audio_bytes) / (SAMPLE_RATE * 2)
+            overall_rms = np.sqrt(
+                np.mean(np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) ** 2)
+            )
+
+            # Filter: terlalu pendek
+            if duration_s < 0.5:
+                print("⏭️  SKIP: terlalu pendek\n")
                 continue
 
+            # Filter: energi terlalu rendah
+            if overall_rms < 300:
+                print("⏭️  SKIP: energi terlalu rendah\n")
+                continue
+
+            print("🔍 Memproses...")
             audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
-            print("🔍 Memproses audio...")
-            result = model.transcribe(
+            result = whisper_model.transcribe(
                 audio_np,
                 language="en",
                 fp16=False,
@@ -140,10 +204,10 @@ def main():
             text = result["text"].strip()
 
             print("=" * 50)
-            if text and text.replace(".", "").replace(" ", "") != "":
-                print(f"📝 Hasil: {text}")
+            if text and text.replace(".", "").replace(",", "").replace(" ", ""):
+                print(f"📝 {text}")
             else:
-                print("📝 Hasil: (tidak terdeteksi ucapan)")
+                print("📝 (tidak terdeteksi ucapan)")
             print("=" * 50)
             print()
 
