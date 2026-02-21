@@ -14,16 +14,25 @@ from silero_vad import load_silero_vad
 SAMPLE_RATE = 16000
 CHUNK_SAMPLES = 512  # ~32ms per chunk, required by Silero VAD
 VOICE_COMMANDS = {
-    "first camera": ["command", "3"],
-    "second camera": ["command", "4"],
-    "record": ["command", "r"],
+    "kamera satu": ["command", "1"],
+    "kamera dua": ["command", "2"],
+    "kamera tiga": ["command", "3"],
+    "kamera empat": ["command", "4"],
+    "merekam": ["command", "r"],
     # Add more mappings here
+}
+
+DIGIT_TO_WORD = {
+    "0": "nol", "1": "satu", "2": "dua", "3": "tiga", "4": "empat",
+    "5": "lima", "6": "enam", "7": "tujuh", "8": "delapan", "9": "sembilan",
 }
 
 def normalize_text(text):
     # Lowercase, remove punctuation, collapse whitespace
     text = text.lower()
     text = re.sub(r'[^a-z0-9 ]+', '', text)
+    # Konversi digit ke kata (misal: "kamera 1" → "kamera satu")
+    text = re.sub(r'\b(\d)\b', lambda m: DIGIT_TO_WORD.get(m.group(1), m.group(1)), text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
@@ -104,6 +113,29 @@ def bytes_to_tensor(chunk_bytes):
     return torch.from_numpy(audio)
 
 
+def calibrate_energy_gate(stream, sample_rate=SAMPLE_RATE):
+    """Kalibrasi awal: baca 50 chunk dari stream, return energy_threshold."""
+    noise_rms_samples = []
+    for _ in range(50):
+        cal_chunk = stream.read(CHUNK_SAMPLES, exception_on_overflow=False)
+        noise_rms_samples.append(get_audio_rms(cal_chunk))
+    return compute_energy_threshold(noise_rms_samples, label="Kalibrasi awal")
+
+
+def compute_energy_threshold(rms_samples, label="Recalibrate"):
+    """Hitung energy threshold dari list RMS tanpa membaca stream baru."""
+    arr = np.array(rms_samples)
+    median = np.median(arr)
+    clean = arr[arr <= median * 3]
+    if len(clean) < 5:
+        clean = arr
+    noise_floor = np.percentile(clean, 75)
+    energy_threshold = max(200, noise_floor * 1.0)
+    outliers = len(arr) - len(clean)
+    print(f"\n📊 [{label}] Noise median: {median:.1f} | Clean P75: {noise_floor:.1f} | Energy gate: {energy_threshold:.1f} ({outliers} outlier dibuang)")
+    return energy_threshold
+
+
 def record_with_silero(silero_model, device_index=None, sample_rate=SAMPLE_RATE):
     """
     Rekam audio menggunakan Silero VAD (neural network) untuk deteksi
@@ -142,23 +174,15 @@ def record_with_silero(silero_model, device_index=None, sample_rate=SAMPLE_RATE)
     for _ in range(10):
         stream.read(CHUNK_SAMPLES, exception_on_overflow=False)
 
-    # Kalibrasi noise floor untuk energy gate
+    # Kalibrasi noise floor awal
     print("🔧 Kalibrasi noise floor... (diam sebentar)")
-    noise_rms_samples = []
-    for _ in range(50):
-        cal_chunk = stream.read(CHUNK_SAMPLES, exception_on_overflow=False)
-        noise_rms_samples.append(get_audio_rms(cal_chunk))
-    # Buang outlier dulu: hapus sampel yang > median × 3
-    # (jika ada suara keras saat kalibrasi, sampelnya dibuang sebelum hitung threshold)
-    arr = np.array(noise_rms_samples)
-    median = np.median(arr)
-    clean = arr[arr <= median * 3]  # hanya pakai sampel yang wajar
-    if len(clean) < 5:
-        clean = arr  # fallback jika terlalu banyak yang dibuang
-    noise_floor = np.percentile(clean, 75)  # P75 dari sampel bersih
-    energy_threshold = max(200, noise_floor * 1.5)
-    print(f"📊 Noise median: {median:.1f} | Clean P75: {noise_floor:.1f} | Energy gate: {energy_threshold:.1f}")
-    print(f"   ({len(arr) - len(clean)} sampel outlier dibuang dari {len(arr)} total)\n")
+    energy_threshold = calibrate_energy_gate(stream, sample_rate)
+
+    # Auto-recalibrate setelah 2 detik idle tanpa speech
+    # 2000ms / 32ms per chunk = 62 chunks
+    IDLE_RECAL_CHUNKS = 62
+    idle_chunks = 0          # counter chunk idle (tidak triggered, tidak speech)
+    idle_rms_buffer = []     # kumpulkan RMS dari chunk idle untuk recalibrate
 
     try:
         while True:
@@ -191,9 +215,25 @@ def record_with_silero(silero_model, device_index=None, sample_rate=SAMPLE_RATE)
                 ring_buffer.append((chunk_bytes, is_speech))
                 num_voiced = sum(1 for _, v in ring_buffer if v)
 
+                # ── Auto-recalibrate saat idle terlalu lama ──────────────────
+                if not is_speech:
+                    idle_chunks += 1
+                    idle_rms_buffer.append(chunk_rms)  # kumpulkan RMS idle
+                    if idle_chunks >= IDLE_RECAL_CHUNKS:
+                        # Recalibrate dari RMS yang sudah dikumpulkan — TANPA baca stream baru
+                        # sehingga tidak ada audio yang terlewat
+                        energy_threshold = compute_energy_threshold(idle_rms_buffer, label="Auto-recal")
+                        idle_chunks = 0
+                        idle_rms_buffer = []
+                        ring_buffer.clear()
+                else:
+                    idle_chunks = 0
+                    idle_rms_buffer = []
+
                 # Trigger jika 75% dari ring buffer adalah speech
                 if num_voiced >= 0.75 * ring_buffer.maxlen:
                     triggered = True
+                    idle_chunks = 0
                     print(f"\n🎤 Suara manusia terdeteksi! (conf: {confidence:.2f}) Merekam...")
                     voiced_frames.extend([c for c, _ in ring_buffer])
                     ring_buffer.clear()
@@ -260,7 +300,7 @@ def main():
 
             result = whisper_model.transcribe(
                 audio_np,
-                language="en",
+                language="id",
                 fp16=False,
                 no_speech_threshold=0.6,
                 logprob_threshold=-1.0,
