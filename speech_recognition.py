@@ -130,7 +130,7 @@ def compute_energy_threshold(rms_samples, label="Recalibrate"):
     if len(clean) < 5:
         clean = arr
     noise_floor = np.percentile(clean, 75)
-    energy_threshold = max(200, noise_floor * 1.0)
+    energy_threshold = max(100, noise_floor * 1.0)  # min diturunkan: cukup untuk suara kecil
     outliers = len(arr) - len(clean)
     print(f"\n📊 [{label}] Noise median: {median:.1f} | Clean P75: {noise_floor:.1f} | Energy gate: {energy_threshold:.1f} ({outliers} outlier dibuang)")
     return energy_threshold
@@ -165,10 +165,11 @@ def record_with_silero(silero_model, device_index=None, sample_rate=SAMPLE_RATE)
     silent_chunks = 0
 
     # 1200ms / 32ms per chunk ≈ 37 chunks diam sebelum berhenti rekam
-    max_silent_chunks = 37
+    # Dinaikkan ke 70 (~2.2 detik) agar jeda bicara normal tidak memotong rekaman
+    max_silent_chunks = 70
 
-    SPEECH_THRESHOLD = 0.5    # di atas ini → suara manusia
-    SILENCE_THRESHOLD = 0.35  # di bawah ini → silence / non-human
+    SPEECH_THRESHOLD = 0.35   # diturunkan: cukup sensitif untuk suara kecil
+    SILENCE_THRESHOLD = 0.25  # diturunkan: berhenti saat benar-benar diam
 
     # Flush stream dulu
     for _ in range(10):
@@ -230,8 +231,8 @@ def record_with_silero(silero_model, device_index=None, sample_rate=SAMPLE_RATE)
                     idle_chunks = 0
                     idle_rms_buffer = []
 
-                # Trigger jika 75% dari ring buffer adalah speech
-                if num_voiced >= 0.75 * ring_buffer.maxlen:
+                # Trigger jika 60% dari ring buffer adalah speech (lebih mudah trigger)
+                if num_voiced >= 0.60 * ring_buffer.maxlen:
                     triggered = True
                     idle_chunks = 0
                     print(f"\n🎤 Suara manusia terdeteksi! (conf: {confidence:.2f}) Merekam...")
@@ -241,7 +242,9 @@ def record_with_silero(silero_model, device_index=None, sample_rate=SAMPLE_RATE)
             else:
                 voiced_frames.append(chunk_bytes)
 
-                is_silent = (confidence < SILENCE_THRESHOLD) or not energy_ok
+                is_silent = confidence < SILENCE_THRESHOLD
+                # Catatan: energy_ok TIDAK dipakai untuk stop rekaman
+                # agar jeda singkat antar kata (nafas, pergantian) tidak memotong rekaman
                 if is_silent:
                     silent_chunks += 1
                 else:
@@ -291,7 +294,7 @@ def main():
                 continue
 
             # Filter: energi terlalu rendah
-            if overall_rms < 300:
+            if overall_rms < 150:  # diturunkan: suara kecil tetap diproses
                 print("⏭️  SKIP: energi terlalu rendah\n")
                 continue
 
