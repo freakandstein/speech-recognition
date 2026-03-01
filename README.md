@@ -1,6 +1,6 @@
 # Speech Recognition CLI with Whisper & Silero VAD
 
-> **Note:** This script was tested and runs well on a MacBook M4 Max using Whisper and Silero VAD. Performance is excellent on Apple Silicon (M4/M3/M2/M1) for real-time speech recognition and transcription.
+> **Note:** This script is tested and runs well on a MacBook M4 Max using Whisper and Silero VAD. Performance is excellent on Apple Silicon (M4/M3/M2/M1) for real-time speech recognition and transcription.
 
 This script records audio from your microphone, automatically detects segments containing human speech using Silero VAD (neural network), and transcribes them using OpenAI Whisper.
 
@@ -10,19 +10,20 @@ This script records audio from your microphone, automatically detects segments c
 - **Auto energy gate**: Calibrates automatically to ignore room noise.
 - **Automatic transcription**: Uses Whisper (model `small`).
 - **Realtime feedback**: Shows confidence, RMS, and recording status in the terminal.
+- **Voice command mapping**: Map recognized phrases to keyboard shortcuts (see below).
 
 ## Installation
 
 1. **Install Python 3.8+**
 2. Install dependencies:
     ```bash
-    pip3 install torch numpy pyaudio whisper silero-vad
+    pip3 install torch numpy pyaudio whisper silero-vad pyautogui
     ```
     - If you get a pyaudio error on Mac, install portaudio first:
-       ```bash
-       brew install portaudio
-       pip3 install pyaudio
-       ```
+      ```bash
+      brew install portaudio
+      pip3 install pyaudio
+      ```
 
 ## Usage
 
@@ -38,8 +39,8 @@ This script records audio from your microphone, automatically detects segments c
 ## Key Parameters
 - **SAMPLE_RATE**: 16000 Hz (standard for VAD & Whisper)
 - **CHUNK_SAMPLES**: 512 (chunk size for Silero VAD)
-- **SPEECH_THRESHOLD**: 0.5 (minimum confidence to be considered human speech)
-- **SILENCE_THRESHOLD**: 0.35 (below this is considered silence)
+- **SPEECH_THRESHOLD**: 0.35 (minimum confidence to be considered human speech)
+- **SILENCE_THRESHOLD**: 0.25 (below this is considered silence)
 - **Energy gate**: Automatically set based on room noise during calibration (uses P75 of clean samples, robust to outliers)
 
 ## Tips
@@ -59,14 +60,16 @@ You can map recognized phrases to keyboard shortcuts using the `VOICE_COMMANDS` 
 
 ```
 VOICE_COMMANDS = {
-    "first camera": ["command", "3"],
-    "second camera": ["command", "4"],
-    "record": ["command", "r"],
+    "kamera 1": ["command", "1"],
+    "kamera 2": ["command", "2"],
+    "kamera 3": ["command", "3"],
+    "kamera 4": ["command", "4"],
+    "merekam": ["command", "r"],
     # Add more mappings here
 }
 ```
 
-When you say "First camera", the script will send Command+3 using `pyautogui` (make sure Python has Accessibility permissions in System Settings). "Second camera" will send Command+4, and "Record" will send Command+R.
+When you say "camera one", the script will send Command+1 using `pyautogui` (make sure Python has Accessibility permissions in System Settings). "camera two" will send Command+2, and so on.
 
 You can add more commands by editing the dictionary. The matching is case-insensitive, ignores punctuation, and supports fuzzy matching for minor typos.
 
