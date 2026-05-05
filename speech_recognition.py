@@ -18,6 +18,7 @@ VOICE_COMMANDS = {
     "kamera dua": ["command", "2"],
     "kamera tiga": ["command", "3"],
     "kamera empat": ["command", "4"],
+    "kamera lima": ["command", "5"],
     "merekam": ["command", "r"],
     # Add more mappings here
 }
