@@ -1,9 +1,11 @@
 import collections
+import os
+import obsws_python as obs
 import numpy as np
 import torch
 import whisper
 import pyaudio
-import pyautogui
+from dotenv import load_dotenv
 
 import re
 from difflib import get_close_matches
@@ -13,14 +15,20 @@ from silero_vad import load_silero_vad
 # ── Silero VAD chunk size harus 512 samples pada 16kHz ──────────────────────
 SAMPLE_RATE = 16000
 CHUNK_SAMPLES = 512  # ~32ms per chunk, required by Silero VAD
+# Sesuaikan value "scene" dengan nama scene di OBS kamu
+# Jalankan script untuk melihat daftar scene OBS yang tersedia
 VOICE_COMMANDS = {
-    "kamera satu": ["command", "1"],
-    "kamera dua": ["command", "2"],
-    "kamera tiga": ["command", "3"],
-    "kamera empat": ["command", "4"],
-    "kamera lima": ["command", "5"],
-    "merekam": ["command", "r"],
-    # Add more mappings here
+    "kamera satu": {"type": "scene", "name": "Scene 1 (2 Views Without Top)"},
+    "kamera dua":  {"type": "scene", "name": "Scene 2 (3 Views)"},
+    "kamera tiga": {"type": "scene", "name": "Scene 3 (2 Views Without Front)"},
+    "merekam":        {"type": "record"},
+    "mulai rekam":    {"type": "record"},
+    "stop rekam":     {"type": "record"},
+    "rekam":          {"type": "record"},
+    "stop recording": {"type": "record"},
+    "start recording":{"type": "record"},
+    "recording":      {"type": "record"},
+    # Tambah mapping di sini
 }
 
 DIGIT_TO_WORD = {
@@ -37,8 +45,46 @@ def normalize_text(text):
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-def run_shortcut(keys):
-    pyautogui.hotkey(*keys)
+load_dotenv()
+
+OBS_HOST     = os.getenv("OBS_HOST", "localhost")
+OBS_PORT     = int(os.getenv("OBS_PORT", "4455"))
+OBS_PASSWORD = os.getenv("OBS_PASSWORD", "")
+
+_CHAR_TO_OBS_KEY = {
+    **{str(i): f"OBS_KEY_{i}" for i in range(10)},
+    **{c: f"OBS_KEY_{c.upper()}" for c in "abcdefghijklmnopqrstuvwxyz"},
+}
+
+def run_command(obs_client, cmd):
+    if cmd["type"] == "scene":
+        try:
+            obs_client.set_current_program_scene(cmd["name"])
+            print(f"✅ OBS scene switched: {cmd['name']}")
+        except Exception as e:
+            print(f"⚠️  OBS scene error: {e}")
+    elif cmd["type"] == "record":
+        try:
+            obs_client.toggle_record()
+            print("✅ OBS recording toggled")
+        except Exception as e:
+            print(f"⚠️  OBS record error: {e}")
+    elif cmd["type"] == "hotkey":
+        keys = cmd["keys"]
+        char = keys[-1]
+        modifiers = keys[:-1]
+        key_id = _CHAR_TO_OBS_KEY.get(char, f"OBS_KEY_{char.upper()}")
+        key_mods = {
+            "shift": "shift" in modifiers,
+            "control": "ctrl" in modifiers,
+            "alt": "alt" in modifiers,
+            "command": "command" in modifiers,
+        }
+        try:
+            obs_client.trigger_hotkey_by_key_sequence(keyId=key_id, keyModifiers=key_mods)
+            print(f"✅ OBS hotkey sent: {key_id}")
+        except Exception as e:
+            print(f"⚠️  OBS hotkey error: {e}")
 
 def load_whisper_model(model_name, device):
     """Load Whisper model, handle sparse tensor untuk MPS."""
@@ -279,6 +325,20 @@ def main():
     # Load Whisper
     whisper_model = load_whisper_model("small", device)
 
+    # Connect ke OBS WebSocket
+    print("🔌 Connecting to OBS WebSocket...")
+    obs_client = None
+    try:
+        obs_client = obs.ReqClient(host=OBS_HOST, port=OBS_PORT, password=OBS_PASSWORD, timeout=3)
+        print("✅ OBS connected")
+        scenes = obs_client.get_scene_list()
+        scene_names = [s["sceneName"] for s in scenes.scenes]
+        print(f"📋 Scene tersedia: {scene_names}")
+        print("   → Sesuaikan VOICE_COMMANDS di kode jika nama scene berbeda\n")
+    except Exception as e:
+        print(f"⚠️  OBS connection failed: {e}")
+        print("   Pastikan OBS berjalan dan WebSocket aktif (Tools → WebSocket Server Settings)\n")
+
     print("🔁 Tekan Ctrl+C untuk berhenti\n")
     try:
         while True:
@@ -306,12 +366,15 @@ def main():
                 audio_np,
                 language="id",
                 fp16=False,
-                no_speech_threshold=0.6,
-                logprob_threshold=-1.0,
+                no_speech_threshold=0.8,
+                logprob_threshold=None,
                 compression_ratio_threshold=2.4,
                 condition_on_previous_text=False,
+                initial_prompt="kamera satu kamera dua kamera tiga merekam rekam mulai rekam stop rekam",
             )
             text = result["text"].strip()
+            no_speech_prob = result["segments"][0]["no_speech_prob"] if result["segments"] else -1
+            print(f"🔬 Raw: '{text}' | no_speech_prob: {no_speech_prob:.2f}")
 
             print("=" * 50)
             if text and text.replace(".", "").replace(",", "").replace(" ", ""):
@@ -328,8 +391,11 @@ def main():
                     if close:
                         match = close[0]
                 if match:
-                    print(f"🔗 Executing shortcut for: {match}")
-                    run_shortcut(VOICE_COMMANDS[match])
+                    print(f"🔗 Executing command for: {match}")
+                    if obs_client:
+                        run_command(obs_client, VOICE_COMMANDS[match])
+                    else:
+                        print("⚠️  OBS not connected, skip")
             else:
                 print("📝 (tidak terdeteksi ucapan)")
             print("=" * 50)
